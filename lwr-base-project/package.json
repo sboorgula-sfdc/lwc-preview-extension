@@ -6,7 +6,7 @@
   "publisher": "lwc-preview-dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/lwc-preview-ext"
+    "url": "https://github.com/sboorgula-sfdc/lwc-preview-extension"
   },
   "license": "MIT",
   "categories": [
