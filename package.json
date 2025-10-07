@@ -2,7 +2,7 @@
   "name": "lwc-preview",
   "displayName": "LWC Preview",
   "description": "Preview Lightning Web Components in VS Code",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "lwc-preview-dev",
   "repository": {
     "type": "git",
@@ -41,6 +41,7 @@
   "scripts": {
     "init": "cd lwr-base-project && npm ci && cd .. && npm ci",
     "vscode:prepublish": "npm run build:zip && npm run compile",
+    "vscode:package": "npm run vscode:prepublish && npm version patch && vsce package",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",

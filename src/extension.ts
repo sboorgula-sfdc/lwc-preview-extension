@@ -103,13 +103,25 @@ async function setupLwrBaseProject(context: vscode.ExtensionContext): Promise<st
         fs.mkdirSync(globalStoragePath, { recursive: true });
     }
 
+    // Get extension version to create versioned folder name
+    const packageJsonPath = path.join(extensionPath, 'package.json');
+    let version = '0.0.0';
+    try {
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        version = packageJson.version || '0.0.0';
+    } catch (error) {
+        console.error('[LWC Preview] Failed to read package.json version:', error);
+    }
+
     const sourceLwrBasePath = path.join(extensionPath, LWR_BASE_PROJECT_FOLDER);
     const sourceZipPath = path.join(extensionPath, `${LWR_BASE_PROJECT_FOLDER}.zip`);
-    const destLwrBasePath = path.join(globalStoragePath, LWR_BASE_PROJECT_FOLDER);
+    // Use versioned folder name to avoid conflicts between versions
+    const versionedFolderName = `${LWR_BASE_PROJECT_FOLDER}-${version}`;
+    const destLwrBasePath = path.join(globalStoragePath, versionedFolderName);
 
     // If we already have the extracted folder in global storage, use it
     if (fs.existsSync(destLwrBasePath)) {
-        console.log(`[LWC Preview] lwr-base-project already exists at: ${destLwrBasePath}`);
+        console.log(`[LWC Preview] Using existing ${versionedFolderName} at: ${destLwrBasePath}`);
         console.log(`[LWC Preview] LWR base project ready at: ${destLwrBasePath}`);
         console.log(`[LWC Preview] Global storage path: ${globalStoragePath}`);
         return destLwrBasePath;
@@ -117,22 +129,35 @@ async function setupLwrBaseProject(context: vscode.ExtensionContext): Promise<st
 
     // Prefer extracting from zip when packaged
     if (fs.existsSync(sourceZipPath)) {
-        console.log(`[LWC Preview] Extracting lwr-base-project from zip: ${sourceZipPath}`);
+        console.log(`[LWC Preview] Extracting ${versionedFolderName} from zip: ${sourceZipPath}`);
         try {
             const zip = new AdmZip(sourceZipPath);
-            // Extract to global storage; archive contains 'lwr-base-project/' root
-            zip.extractAllTo(globalStoragePath, true);
-            if (!fs.existsSync(destLwrBasePath)) {
-                throw new Error('Extraction succeeded but destination folder not found');
+            // Extract to a temp location first
+            const tempExtractPath = path.join(globalStoragePath, 'temp-extract');
+            zip.extractAllTo(tempExtractPath, true);
+
+            // Move the extracted 'lwr-base-project' folder to the versioned name
+            const extractedPath = path.join(tempExtractPath, LWR_BASE_PROJECT_FOLDER);
+            if (!fs.existsSync(extractedPath)) {
+                throw new Error('Extraction succeeded but lwr-base-project folder not found in zip');
             }
-            console.log(`[LWC Preview] Successfully extracted lwr-base-project`);
+
+            // Rename to versioned folder name
+            fs.renameSync(extractedPath, destLwrBasePath);
+
+            // Clean up temp directory
+            if (fs.existsSync(tempExtractPath)) {
+                fs.rmdirSync(tempExtractPath, { recursive: true });
+            }
+
+            console.log(`[LWC Preview] Successfully extracted ${versionedFolderName}`);
         } catch (e) {
             console.error('[LWC Preview] Failed to extract zip, falling back to copy:', e);
             // Fall back to copying from source folder if available
             if (fs.existsSync(sourceLwrBasePath)) {
-                console.log(`[LWC Preview] Copying lwr-base-project from ${sourceLwrBasePath} to ${destLwrBasePath}`);
+                console.log(`[LWC Preview] Copying ${versionedFolderName} from ${sourceLwrBasePath} to ${destLwrBasePath}`);
                 await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
-                console.log(`[LWC Preview] Successfully copied lwr-base-project`);
+                console.log(`[LWC Preview] Successfully copied ${versionedFolderName}`);
             } else {
                 throw new Error(`Neither zip nor source folder available. Looked for zip at: ${sourceZipPath} and folder at: ${sourceLwrBasePath}`);
             }
@@ -142,12 +167,12 @@ async function setupLwrBaseProject(context: vscode.ExtensionContext): Promise<st
         if (!fs.existsSync(sourceLwrBasePath)) {
             throw new Error(`lwr-base-project folder not found at: ${sourceLwrBasePath}`);
         }
-        console.log(`[LWC Preview] Copying lwr-base-project from ${sourceLwrBasePath} to ${destLwrBasePath}`);
+        console.log(`[LWC Preview] Copying ${versionedFolderName} from ${sourceLwrBasePath} to ${destLwrBasePath}`);
         await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
-        console.log(`[LWC Preview] Successfully copied lwr-base-project`);
+        console.log(`[LWC Preview] Successfully copied ${versionedFolderName}`);
     }
 
-    console.log(`[LWC Preview] LWR base project ready at: ${destLwrBasePath}`);
+    console.log(`[LWC Preview] LWR base project (v${version}) ready at: ${destLwrBasePath}`);
     console.log(`[LWC Preview] Global storage path: ${globalStoragePath}`);
     return destLwrBasePath;
 }
