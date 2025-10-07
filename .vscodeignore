@@ -8,7 +8,6 @@ vsc-extension-quickstart.md
 tsconfig.json
 .eslintrc.json
 **/*.map
-node_modules/**
 __lwr_cache__/**
 *.log
 npm-debug.log*
@@ -29,5 +28,6 @@ npm-debug.log*
 **/.prettierignore
 src/modules/c/**
 
-# Exclude cache from lwr-base-project (node_modules will be packaged)
-lwr-base-project/__lwr_cache__/**
+# Exclude raw lwr-base-project from VSIX; we ship a zip instead
+lwr-base-project/**
+!lwr-base-project.zip

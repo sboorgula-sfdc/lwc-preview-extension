@@ -13,7 +13,7 @@
     "Other"
   ],
   "scripts": {
-    "start": "lwr dev --port 8347",
+    "start": "lwr dev",
     "build": "lwr build"
   },
   "dependencies": {

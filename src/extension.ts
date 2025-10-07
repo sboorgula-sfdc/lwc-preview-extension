@@ -333,9 +333,9 @@ async function startLwrServer(context: vscode.ExtensionContext) {
 
     const projectRoot = lwrProjectRoot;
 
-    // Use npx to run lwr
-    const command = 'npx';
-    const args = ['--yes', 'lwr', 'dev', '--port', String(LWR_SERVER_PORT)];
+    // Use npm to run lwr with port argument
+    const command = 'npm';
+    const args = ['start', '--', '--port', String(LWR_SERVER_PORT)];
 
     console.log(`[LWC Preview] Starting LWR server in: ${projectRoot}`);
 
