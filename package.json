@@ -2,7 +2,7 @@
   "name": "lwc-preview",
   "displayName": "LWC Preview",
   "description": "Preview Lightning Web Components in VS Code",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "lwc-preview-dev",
   "repository": {
     "type": "git",
@@ -36,6 +36,16 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "LWC Preview",
+      "properties": {
+        "lwc-preview.autoOpenPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open preview panel when switching to LWC component files. When disabled, preview only opens when clicking the preview icon."
+        }
+      }
     }
   },
   "scripts": {

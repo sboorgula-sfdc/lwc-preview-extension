@@ -89,7 +89,7 @@ export function getErrorHtml(message: string): string {
 /**
  * Generate main preview HTML for preview panel
  */
-export function getPreviewHtml(componentName: string, port: number): string {
+export function getPreviewHtml(componentName: string, port: number, autoOpenEnabled: boolean = true): string {
     return `<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -127,6 +127,112 @@ export function getPreviewHtml(componentName: string, port: number): string {
             .toolbar-component {
                 color: #4ec9b0;
                 font-family: 'Courier New', monospace;
+            }
+            .toolbar-spacer {
+                flex: 1;
+            }
+            .auto-open-toggle-container {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .toggle-label {
+                font-size: 12px;
+                color: #cccccc;
+                user-select: none;
+            }
+            .force-reload-button {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 12px;
+                background: #3e3e42;
+                border-radius: 4px;
+                cursor: pointer;
+                user-select: none;
+                transition: all 0.2s;
+                border: 1px solid #555;
+                font-size: 12px;
+                color: #cccccc;
+            }
+            .force-reload-button:hover {
+                background: #4e4e52;
+                border-color: #666;
+            }
+            .force-reload-button:active {
+                background: #2e2e32;
+                transform: scale(0.95);
+            }
+            .force-reload-button.reloading {
+                background: #0e639c;
+                border-color: #0e639c;
+                cursor: wait;
+            }
+            .reload-icon {
+                font-size: 15px;
+                transition: transform 0.3s;
+            }
+            .force-reload-button.reloading .reload-icon {
+                animation: spin-reload 1s linear infinite;
+            }
+            @keyframes spin-reload {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            .toggle-switch {
+                position: relative;
+                width: 44px;
+                height: 22px;
+                background: #3e3e42;
+                border-radius: 12px;
+                cursor: pointer;
+                transition: background 0.3s ease;
+                border: 1px solid #555;
+            }
+            .toggle-switch:hover {
+                background: #4e4e52;
+            }
+            .toggle-switch.enabled {
+                background: #0e639c;
+                border-color: #0e639c;
+            }
+            .toggle-switch.enabled:hover {
+                background: #1177bb;
+            }
+            .toggle-slider {
+                position: absolute;
+                top: 2px;
+                left: 2px;
+                width: 18px;
+                height: 18px;
+                background: #ffffff;
+                border-radius: 50%;
+                transition: transform 0.3s ease;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            }
+            .toggle-switch.enabled .toggle-slider {
+                transform: translateX(20px);
+            }
+            .toggle-icon {
+                position: absolute;
+                top: 50%;
+                transform: translateY(-50%);
+                font-size: 10px;
+                transition: opacity 0.2s ease;
+            }
+            .toggle-icon-off {
+                left: 6px;
+                opacity: 1;
+            }
+            .toggle-icon-on {
+                right: 6px;
+                opacity: 0;
+            }
+            .toggle-switch.enabled .toggle-icon-off {
+                opacity: 0;
+            }
+            .toggle-switch.enabled .toggle-icon-on {
+                opacity: 1;
             }
             .container {
                 display: flex;
@@ -264,6 +370,19 @@ export function getPreviewHtml(componentName: string, port: number): string {
             <div class="toolbar">
                 <span class="toolbar-title">⚡ LWC Preview</span>
                 <span class="toolbar-component" id="component-name">${componentName}</span>
+                <div class="toolbar-spacer"></div>
+                <div class="force-reload-button" id="force-reload-button" title="Force Reload - Restart server and refresh preview">
+                    <span class="reload-icon">🔄</span>
+                    <span class="reload-label">Force Reload</span>
+                </div>
+                <div class="auto-open-toggle-container">
+                    <span class="toggle-label" id="toggle-label">${autoOpenEnabled ? 'Auto-open' : 'Manual'}</span>
+                    <div class="toggle-switch ${autoOpenEnabled ? 'enabled' : ''}" id="auto-open-toggle" title="${autoOpenEnabled ? 'Auto-open enabled - Click to disable' : 'Manual mode - Click to enable auto-open'}">
+                        <span class="toggle-icon toggle-icon-off">✕</span>
+                        <span class="toggle-icon toggle-icon-on">✓</span>
+                        <div class="toggle-slider"></div>
+                    </div>
+                </div>
             </div>
             <iframe id="preview-frame" class="preview-frame" src="http://localhost:${port}"></iframe>
             <div class="loading-overlay" id="loading-overlay">
@@ -295,6 +414,12 @@ export function getPreviewHtml(componentName: string, port: number): string {
             const lwrErrorMessage = document.getElementById('lwr-error-message');
             const lwrErrorStack = document.getElementById('lwr-error-stack');
             const lwrErrorDismiss = document.getElementById('lwr-error-dismiss');
+            const autoOpenToggle = document.getElementById('auto-open-toggle');
+            const toggleLabel = document.getElementById('toggle-label');
+            const forceReloadButton = document.getElementById('force-reload-button');
+            
+            let autoOpenEnabled = ${autoOpenEnabled ? 'true' : 'false'};
+            let isReloading = false;
 
             function setLoading(isLoading, text = 'Loading component...') {
                 if (isLoading) {
@@ -320,6 +445,49 @@ export function getPreviewHtml(componentName: string, port: number): string {
             }
 
             lwrErrorDismiss.addEventListener('click', dismissLwrError);
+
+            // Handle force reload button
+            forceReloadButton.addEventListener('click', () => {
+                if (isReloading) return; // Prevent double-clicking
+                
+                isReloading = true;
+                forceReloadButton.classList.add('reloading');
+                forceReloadButton.title = 'Reloading server...';
+                
+                // Send force reload message to extension
+                vscode.postMessage({
+                    type: 'forceReload'
+                });
+                
+                // Reset button state after a delay (extension will handle actual reload)
+                setTimeout(() => {
+                    isReloading = false;
+                    forceReloadButton.classList.remove('reloading');
+                    forceReloadButton.title = 'Force Reload - Restart server and refresh preview';
+                }, 5000);
+            });
+
+            // Handle auto-open toggle
+            autoOpenToggle.addEventListener('click', () => {
+                autoOpenEnabled = !autoOpenEnabled;
+                updateAutoOpenUI();
+                vscode.postMessage({
+                    type: 'toggleAutoOpen',
+                    enabled: autoOpenEnabled
+                });
+            });
+
+            function updateAutoOpenUI() {
+                if (autoOpenEnabled) {
+                    autoOpenToggle.classList.add('enabled');
+                    toggleLabel.textContent = 'Auto-open';
+                    autoOpenToggle.title = 'Auto-open enabled - Click to disable';
+                } else {
+                    autoOpenToggle.classList.remove('enabled');
+                    toggleLabel.textContent = 'Manual';
+                    autoOpenToggle.title = 'Manual mode - Click to enable auto-open';
+                }
+            }
 
             let isLwcReady = false;
             let pendingComponentName = '${componentName}';

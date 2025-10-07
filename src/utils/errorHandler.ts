@@ -1,7 +1,52 @@
+import { LwrErrorInfo } from '../types';
+
+/**
+ * Custom error classes for better error handling
+ */
+export class LwcPreviewError extends Error {
+    constructor(message: string, public readonly originalError?: Error) {
+        super(message);
+        this.name = 'LwcPreviewError';
+        Object.setPrototypeOf(this, LwcPreviewError.prototype);
+    }
+}
+
+export class ProjectSetupError extends LwcPreviewError {
+    constructor(message: string, originalError?: Error) {
+        super(message, originalError);
+        this.name = 'ProjectSetupError';
+    }
+}
+
+export class ServerStartError extends LwcPreviewError {
+    constructor(message: string, originalError?: Error) {
+        super(message, originalError);
+        this.name = 'ServerStartError';
+    }
+}
+
+export class FileSyncError extends LwcPreviewError {
+    constructor(message: string, originalError?: Error) {
+        super(message, originalError);
+        this.name = 'FileSyncError';
+    }
+}
+
+/**
+ * Error type enum
+ */
+export enum LwrErrorType {
+    LWC_COMPILATION = 'LWC Compilation Error',
+    TEMPLATE = 'LWC Template Error',
+    MODULE_RESOLUTION = 'Module Resolution Error',
+    SYNTAX = 'JavaScript Syntax Error',
+    GENERIC = 'LWR Server Error'
+}
+
 /**
  * Extract LWC compilation error from output
  */
-export function extractLwcError(output: string): string {
+function extractLwcError(output: string): string {
     const match = output.match(/LWC\d+:([^\n]+)/);
     return match ? match[1].trim() : output.split('\n')[0];
 }
@@ -9,7 +54,7 @@ export function extractLwcError(output: string): string {
 /**
  * Extract template error from output
  */
-export function extractTemplateError(output: string): string {
+function extractTemplateError(output: string): string {
     const lines = output.split('\n');
     for (const line of lines) {
         if (line.includes('error') && line.trim().length > 0) {
@@ -22,7 +67,7 @@ export function extractTemplateError(output: string): string {
 /**
  * Extract module resolution error from output
  */
-export function extractModuleError(output: string): string {
+function extractModuleError(output: string): string {
     const match = output.match(/Cannot find module ['"]([^'"]+)['"]/);
     if (match) {
         return `Cannot find module "${match[1]}". Check your imports.`;
@@ -33,7 +78,7 @@ export function extractModuleError(output: string): string {
 /**
  * Extract JavaScript syntax error from output
  */
-export function extractSyntaxError(output: string): string {
+function extractSyntaxError(output: string): string {
     const match = output.match(/SyntaxError: ([^\n]+)/);
     return match ? match[1].trim() : output.split('\n')[0];
 }
@@ -41,7 +86,7 @@ export function extractSyntaxError(output: string): string {
 /**
  * Extract generic error from output
  */
-export function extractGenericError(output: string): string {
+function extractGenericError(output: string): string {
     const match = output.match(/Error: ([^\n]+)/);
     if (match) {
         return match[1].trim();
@@ -51,29 +96,71 @@ export function extractGenericError(output: string): string {
 }
 
 /**
+ * Determine error type from output
+ */
+function determineErrorType(errorOutput: string): LwrErrorType | null {
+    if (errorOutput.includes('LWC1')) {
+        return LwrErrorType.LWC_COMPILATION;
+    } else if (errorOutput.includes('template') && errorOutput.includes('error')) {
+        return LwrErrorType.TEMPLATE;
+    } else if (errorOutput.includes('Cannot find module') || errorOutput.includes('Module not found')) {
+        return LwrErrorType.MODULE_RESOLUTION;
+    } else if (errorOutput.includes('SyntaxError') || errorOutput.includes('Unexpected token')) {
+        return LwrErrorType.SYNTAX;
+    } else if (errorOutput.includes('Error:') || errorOutput.includes('ERROR')) {
+        return LwrErrorType.GENERIC;
+    }
+    return null;
+}
+
+/**
+ * Extract error message based on type
+ */
+function extractErrorMessage(errorOutput: string, errorType: LwrErrorType): string {
+    switch (errorType) {
+        case LwrErrorType.LWC_COMPILATION:
+            return extractLwcError(errorOutput);
+        case LwrErrorType.TEMPLATE:
+            return extractTemplateError(errorOutput);
+        case LwrErrorType.MODULE_RESOLUTION:
+            return extractModuleError(errorOutput);
+        case LwrErrorType.SYNTAX:
+            return extractSyntaxError(errorOutput);
+        case LwrErrorType.GENERIC:
+        default:
+            return extractGenericError(errorOutput);
+    }
+}
+
+/**
  * Parse LWR server error output and return formatted error message
  */
-export function parseLwrError(errorOutput: string): { message: string; stack: string } | null {
+export function parseLwrError(errorOutput: string): LwrErrorInfo | null {
     // Ignore non-error output
     if (!errorOutput.includes('Error') && !errorOutput.includes('LWC1')) {
         return null;
     }
 
-    let errorMessage = '';
-    const errorStack = errorOutput;
-
-    if (errorOutput.includes('LWC1')) {
-        errorMessage = 'LWC Compilation Error: ' + extractLwcError(errorOutput);
-    } else if (errorOutput.includes('template') && errorOutput.includes('error')) {
-        errorMessage = 'LWC Template Error: ' + extractTemplateError(errorOutput);
-    } else if (errorOutput.includes('Cannot find module') || errorOutput.includes('Module not found')) {
-        errorMessage = 'Module Resolution Error: ' + extractModuleError(errorOutput);
-    } else if (errorOutput.includes('SyntaxError') || errorOutput.includes('Unexpected token')) {
-        errorMessage = 'JavaScript Syntax Error: ' + extractSyntaxError(errorOutput);
-    } else if (errorOutput.includes('Error:') || errorOutput.includes('ERROR')) {
-        errorMessage = 'LWR Server Error: ' + extractGenericError(errorOutput);
+    const errorType = determineErrorType(errorOutput);
+    if (!errorType) {
+        return null;
     }
 
-    return errorMessage ? { message: errorMessage, stack: errorStack } : null;
+    const errorMessage = `${errorType}: ${extractErrorMessage(errorOutput, errorType)}`;
+    const errorStack = errorOutput;
+
+    return { message: errorMessage, stack: errorStack };
+}
+
+/**
+ * Format error for display to user
+ */
+export function formatErrorForDisplay(error: Error): string {
+    if (error instanceof LwcPreviewError) {
+        return error.originalError
+            ? `${error.message}\nCaused by: ${error.originalError.message}`
+            : error.message;
+    }
+    return error.message;
 }
 
