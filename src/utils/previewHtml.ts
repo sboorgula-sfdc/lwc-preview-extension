@@ -321,6 +321,9 @@ export function getPreviewHtml(componentName: string, port: number): string {
 
             lwrErrorDismiss.addEventListener('click', dismissLwrError);
 
+            let isLwcReady = false;
+            let pendingComponentName = '${componentName}';
+
             window.addEventListener('message', event => {
                 if (event.source === iframe.contentWindow) {
                     const message = event.data;
@@ -330,6 +333,16 @@ export function getPreviewHtml(componentName: string, port: number): string {
                             loadingText.textContent = 'Failed to load ' + message.componentName;
                             setTimeout(() => setLoading(false), 2000);
                         }
+                    } else if (message.type === 'lwcReady') {
+                        // LWC component is ready to receive messages
+                        isLwcReady = true;
+                        if (pendingComponentName) {
+                            iframe.contentWindow.postMessage({
+                                type: 'updateComponent',
+                                componentName: pendingComponentName
+                            }, 'http://localhost:${port}');
+                            pendingComponentName = '';
+                        }
                     }
                     return;
                 }
@@ -338,28 +351,23 @@ export function getPreviewHtml(componentName: string, port: number): string {
                 
                 if (message.type === 'updateComponent') {
                     dismissLwrError();
-                    setLoading(true, 'Loading ' + (message.componentName || 'component') + '...');
                     componentNameEl.textContent = message.componentName || '';
-                    iframe.contentWindow.postMessage({
-                        type: 'updateComponent',
-                        componentName: message.componentName
-                    }, 'http://localhost:${port}');
+                    
+                    if (isLwcReady) {
+                        iframe.contentWindow.postMessage({
+                            type: 'updateComponent',
+                            componentName: message.componentName
+                        }, 'http://localhost:${port}');
+                    } else {
+                        // Store for later when LWC is ready
+                        pendingComponentName = message.componentName;
+                    }
                 } else if (message.type === 'updateLoadingState') {
                     setLoading(message.isLoading, message.text || 'Loading...');
                 } else if (message.type === 'lwrError') {
                     showLwrError(message.errorMessage, message.errorStack);
                 } else if (message.type === 'clearLwrError') {
                     dismissLwrError();
-                }
-            });
-
-            iframe.addEventListener('load', () => {
-                if ('${componentName}') {
-                    setLoading(true, 'Loading ${componentName}...');
-                    iframe.contentWindow.postMessage({
-                        type: 'updateComponent',
-                        componentName: '${componentName}'
-                    }, 'http://localhost:${port}');
                 }
             });
         </script>

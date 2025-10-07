@@ -67,7 +67,19 @@ export async function activate(context: vscode.ExtensionContext) {
     await ensureDependenciesInstalled(context);
 
     startLwrServer(context);
-    initialSyncComponents(context);
+
+    // Wait for initial component sync to complete before auto-opening preview
+    await initialSyncComponents(context);
+
+    // Auto-open preview if an LWC component is already open
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor) {
+        const componentInfo = getComponentInfo(activeEditor.document.uri.fsPath);
+        if (componentInfo) {
+            currentComponentName = componentInfo.componentName;
+            await showPreview(context, componentInfo);
+        }
+    }
 }
 
 function checkIsSfdxProject(): boolean {
@@ -204,9 +216,15 @@ function setupActiveEditorTracking(context: vscode.ExtensionContext) {
         if (!editor) return;
 
         const componentInfo = getComponentInfo(editor.document.uri.fsPath);
-        if (componentInfo && componentInfo.componentName !== currentComponentName) {
-            currentComponentName = componentInfo.componentName;
-            if (previewPanel) {
+        if (componentInfo) {
+            // Auto-open preview if not already open
+            if (!previewPanel) {
+                currentComponentName = componentInfo.componentName;
+                await showPreview(context, componentInfo);
+            }
+            // Update preview if component changed
+            else if (componentInfo.componentName !== currentComponentName) {
+                currentComponentName = componentInfo.componentName;
                 updatePreviewComponent(currentComponentName);
             }
         }

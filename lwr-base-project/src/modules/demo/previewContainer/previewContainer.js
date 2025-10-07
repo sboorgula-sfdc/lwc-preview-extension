@@ -7,6 +7,11 @@ export default class PreviewContainer extends LightningElement {
         // Listen for messages from VS Code extension
         this.boundHandleMessage = this.handleMessage.bind(this);
         window.addEventListener('message', this.boundHandleMessage);
+
+        // Notify parent window that we're ready to receive messages
+        window.parent.postMessage({
+            type: 'lwcReady'
+        }, '*');
     }
 
     disconnectedCallback() {
