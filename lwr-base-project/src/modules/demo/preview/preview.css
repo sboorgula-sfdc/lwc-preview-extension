@@ -1,0 +1,97 @@
+.error-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 400px;
+    padding: 40px;
+    background: linear-gradient(135deg, #1e1e1e 0%, #2d2d30 100%);
+    color: #cccccc;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+.error-icon {
+    font-size: 64px;
+    margin-bottom: 20px;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.1);
+        opacity: 0.8;
+    }
+}
+
+.error-title {
+    font-size: 24px;
+    font-weight: 600;
+    color: #f48771;
+    margin: 0 0 20px 0;
+}
+
+.error-component {
+    font-size: 16px;
+    color: #858585;
+    margin-bottom: 15px;
+}
+
+.error-component strong {
+    color: #4ec9b0;
+    font-family: 'Courier New', monospace;
+}
+
+.error-message {
+    font-size: 14px;
+    color: #f48771;
+    background: rgba(244, 135, 113, 0.1);
+    padding: 15px 20px;
+    border-radius: 6px;
+    border-left: 4px solid #f48771;
+    margin-bottom: 20px;
+    max-width: 600px;
+    text-align: left;
+    width: 100%;
+}
+
+.error-details {
+    max-width: 600px;
+    width: 100%;
+}
+
+.error-details details {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.error-details summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: #858585;
+    padding: 5px;
+    user-select: none;
+}
+
+.error-details summary:hover {
+    color: #cccccc;
+}
+
+.error-details pre {
+    margin: 10px 0 0 0;
+    padding: 15px;
+    background: #1e1e1e;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+    color: #d4d4d4;
+    font-family: 'Courier New', Consolas, monospace;
+    line-height: 1.5;
+}

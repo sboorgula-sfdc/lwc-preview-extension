@@ -1,0 +1,14 @@
+out
+node_modules
+.vscode/**
+.vscode-test/
+*.vsix
+.DS_Store
+__lwr_cache__
+.compile-temp
+.cursor
+
+# Exclude generated files in lwr-base-project
+lwr-base-project/node_modules
+lwr-base-project/__lwr_cache__
+lwr-base-project/src/modules/c/**

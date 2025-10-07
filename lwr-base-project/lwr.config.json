@@ -1,0 +1,23 @@
+{
+    "lwc": {
+        "modules": [
+            {
+                "dir": "$rootDir/src/modules"
+            },
+            {
+                "npm": "lightning-base-components"
+            }
+        ]
+    },
+    "routes": [
+        {
+            "id": "previewContainer",
+            "path": "/",
+            "rootComponent": "demo/previewContainer",
+            "layoutTemplate": "$layoutsDir/main.html",
+            "bootstrap": {
+                "syntheticShadow": true
+            }
+        }
+    ]
+}

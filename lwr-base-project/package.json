@@ -1,0 +1,26 @@
+{
+  "name": "lwc-base-project",
+  "displayName": "LWC Preview proxy",
+  "description": "Preview Lightning Web Components in VS Code",
+  "version": "0.0.1",
+  "publisher": "lwc-preview-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/lwc-preview-ext"
+  },
+  "license": "MIT",
+  "categories": [
+    "Other"
+  ],
+  "scripts": {
+    "start": "lwr dev --port 8347",
+    "build": "lwr build"
+  },
+  "dependencies": {
+    "@lwc/compiler": "8.22.4",
+    "@lwc/module-resolver": "8.22.4",
+    "lightning-base-components": "1.27.2-alpha",
+    "lwc": "8.22.4",
+    "lwr": "0.18.3"
+  }
+}

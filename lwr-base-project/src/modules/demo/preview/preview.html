@@ -1,0 +1,19 @@
+<template>
+    <template if:true={hasError}>
+        <div class="error-container">
+            <div class="error-icon">⚠️</div>
+            <h2 class="error-title">Component Load Error</h2>
+            <div class="error-component">Component: <strong>{errorComponentName}</strong></div>
+            <div class="error-message">{errorMessage}</div>
+            <div class="error-details">
+                <details>
+                    <summary>Error Details</summary>
+                    <pre>{errorStack}</pre>
+                </details>
+            </div>
+        </div>
+    </template>
+    <template if:true={hasComponent}>
+        <lwc:component lwc:is={componentConstructor}></lwc:component>
+    </template>
+</template>
