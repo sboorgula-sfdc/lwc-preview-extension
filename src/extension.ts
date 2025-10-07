@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import AdmZip from 'adm-zip';
 import { getComponentInfo, ComponentInfo } from './utils/componentResolver';
 import { copyDirectoryOptimized, copyFile, shouldCopyFile, cleanupComponentFolder } from './utils/fileSystem';
 import { parseLwrError } from './utils/errorHandler';
@@ -91,20 +92,47 @@ async function setupLwrBaseProject(context: vscode.ExtensionContext): Promise<st
     }
 
     const sourceLwrBasePath = path.join(extensionPath, LWR_BASE_PROJECT_FOLDER);
+    const sourceZipPath = path.join(extensionPath, `${LWR_BASE_PROJECT_FOLDER}.zip`);
     const destLwrBasePath = path.join(globalStoragePath, LWR_BASE_PROJECT_FOLDER);
 
-    // Check if source lwr-base-project exists in extension
-    if (!fs.existsSync(sourceLwrBasePath)) {
-        throw new Error(`lwr-base-project folder not found at: ${sourceLwrBasePath}`);
+    // If we already have the extracted folder in global storage, use it
+    if (fs.existsSync(destLwrBasePath)) {
+        console.log(`[LWC Preview] lwr-base-project already exists at: ${destLwrBasePath}`);
+        console.log(`[LWC Preview] LWR base project ready at: ${destLwrBasePath}`);
+        console.log(`[LWC Preview] Global storage path: ${globalStoragePath}`);
+        return destLwrBasePath;
     }
 
-    // Copy entire lwr-base-project folder if it doesn't exist in global storage
-    if (!fs.existsSync(destLwrBasePath)) {
+    // Prefer extracting from zip when packaged
+    if (fs.existsSync(sourceZipPath)) {
+        console.log(`[LWC Preview] Extracting lwr-base-project from zip: ${sourceZipPath}`);
+        try {
+            const zip = new AdmZip(sourceZipPath);
+            // Extract to global storage; archive contains 'lwr-base-project/' root
+            zip.extractAllTo(globalStoragePath, true);
+            if (!fs.existsSync(destLwrBasePath)) {
+                throw new Error('Extraction succeeded but destination folder not found');
+            }
+            console.log(`[LWC Preview] Successfully extracted lwr-base-project`);
+        } catch (e) {
+            console.error('[LWC Preview] Failed to extract zip, falling back to copy:', e);
+            // Fall back to copying from source folder if available
+            if (fs.existsSync(sourceLwrBasePath)) {
+                console.log(`[LWC Preview] Copying lwr-base-project from ${sourceLwrBasePath} to ${destLwrBasePath}`);
+                await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
+                console.log(`[LWC Preview] Successfully copied lwr-base-project`);
+            } else {
+                throw new Error(`Neither zip nor source folder available. Looked for zip at: ${sourceZipPath} and folder at: ${sourceLwrBasePath}`);
+            }
+        }
+    } else {
+        // Dev scenario: zip not present, copy from workspace folder bundled with extension
+        if (!fs.existsSync(sourceLwrBasePath)) {
+            throw new Error(`lwr-base-project folder not found at: ${sourceLwrBasePath}`);
+        }
         console.log(`[LWC Preview] Copying lwr-base-project from ${sourceLwrBasePath} to ${destLwrBasePath}`);
         await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
         console.log(`[LWC Preview] Successfully copied lwr-base-project`);
-    } else {
-        console.log(`[LWC Preview] lwr-base-project already exists at: ${destLwrBasePath}`);
     }
 
     console.log(`[LWC Preview] LWR base project ready at: ${destLwrBasePath}`);

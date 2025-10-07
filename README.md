@@ -34,3 +34,4 @@ Preview Lightning Web Components directly in VS Code.
 ## License
 
 MIT
+

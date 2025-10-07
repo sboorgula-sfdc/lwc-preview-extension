@@ -39,11 +39,16 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "init": "cd lwr-base-project && npm ci && cd .. && npm ci",
+    "vscode:prepublish": "npm run build:zip && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "build:zip": "node scripts/zipLwrBaseProject.js"
+  },
+  "dependencies": {
+    "adm-zip": "0.5.10"
   },
   "devDependencies": {
     "@types/node": "20.10.0",
