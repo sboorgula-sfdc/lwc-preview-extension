@@ -1,611 +1,440 @@
 import * as vscode from 'vscode';
-import * as child_process from 'child_process';
-import * as path from 'path';
 import * as fs from 'fs';
-import AdmZip from 'adm-zip';
-import { getComponentInfo, ComponentInfo } from './utils/componentResolver';
-import { copyDirectoryOptimized, copyFile, shouldCopyFile, cleanupComponentFolder } from './utils/fileSystem';
-import { parseLwrError } from './utils/errorHandler';
-import { getLoadingHtml, getErrorHtml, getPreviewHtml } from './utils/previewHtml';
+import * as path from 'path';
+import {
+    SFDX_PROJECT_FILE,
+    COMMAND_TOGGLE_PREVIEW,
+    LOG_PREFIX,
+    LWR_SERVER_PORT,
+    LWC_SOURCE_PATH
+} from './constants';
+import { getComponentInfo, ComponentInfo, isComponentValid, getComponentDirectoryPath } from './utils/componentResolver';
+import { cleanupComponentFolder } from './utils/fileSystem';
+import { ProjectSetupError, formatErrorForDisplay } from './utils/errorHandler';
 
-const LWR_SERVER_PORT = 8347;
-const LWR_BASE_PROJECT_FOLDER = 'lwr-base-project';
+// Services
+import { StatusBarManager } from './services/StatusBarManager';
+import { ProjectSetupService } from './services/ProjectSetupService';
+import { DependencyManager } from './services/DependencyManager';
+import { ServerManager } from './services/ServerManager';
+import { PreviewPanelManager } from './services/PreviewPanelManager';
+import { FileWatcherService } from './services/FileWatcherService';
 
-let lwrServerProcess: child_process.ChildProcess | null = null;
-let previewPanel: vscode.WebviewPanel | null = null;
-let serverReady = false;
-let fileWatcher: vscode.FileSystemWatcher | null = null;
-let currentComponentName: string | null = null;
-let isSfdxProject = false;
-let isInitialCopyInProgress = false;
-let extensionContext: vscode.ExtensionContext | null = null;
-let hasActiveError = false;
-let errorDebounceTimer: NodeJS.Timeout | null = null;
-let statusBarItem: vscode.StatusBarItem | null = null;
-let lwrProjectRoot: string | null = null;
+/**
+ * Main extension class that orchestrates all services
+ */
+class LwcPreviewExtension {
+    private statusBarManager: StatusBarManager;
+    private projectSetupService: ProjectSetupService;
+    private dependencyManager: DependencyManager | null = null;
+    private serverManager: ServerManager | null = null;
+    private previewPanelManager: PreviewPanelManager;
+    private fileWatcherService: FileWatcherService | null = null;
 
-export async function activate(context: vscode.ExtensionContext) {
-    extensionContext = context;
-    isSfdxProject = checkIsSfdxProject();
+    private lwrProjectRoot: string | null = null;
+    private workspaceRoot: string | null = null;
+    private isSfdxProject: boolean = false;
+    private previewCommand: vscode.Disposable | null = null;
+    private isForceReloading: boolean = false;
 
-    // Create status bar item
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.text = "$(loading~spin) LWC Preview";
-    statusBarItem.tooltip = "Starting LWC Preview server...";
-    context.subscriptions.push(statusBarItem);
-
-    if (!isSfdxProject) {
-        statusBarItem.text = "$(warning) LWC Preview";
-        statusBarItem.tooltip = "Not an SFDX project";
-        statusBarItem.show();
-
-        context.subscriptions.push(
-            vscode.commands.registerCommand('lwc-preview.togglePreview', () => {
-                vscode.window.showWarningMessage('LWC Preview requires an SFDX project (sfdx-project.json not found)');
-            })
-        );
-        return;
+    constructor(private readonly context: vscode.ExtensionContext) {
+        this.statusBarManager = new StatusBarManager(context);
+        this.projectSetupService = new ProjectSetupService(context);
+        this.previewPanelManager = new PreviewPanelManager(context);
     }
 
-    statusBarItem.show();
+    /**
+     * Activate the extension
+     */
+    public async activate(): Promise<void> {
+        this.statusBarManager.initialize();
+        this.statusBarManager.showLoading();
 
-    // Setup lwr-base-project folder
-    try {
-        lwrProjectRoot = await setupLwrBaseProject(context);
-    } catch (error) {
-        vscode.window.showErrorMessage(`Failed to setup LWR base project: ${error}`);
-        statusBarItem.text = "$(error) LWC Preview";
-        statusBarItem.tooltip = "Failed to setup base project";
-        return;
-    }
+        this.isSfdxProject = this.checkIsSfdxProject();
 
-    setupFileWatcher(context);
-    setupActiveEditorTracking(context);
-    registerPreviewCommand(context);
-
-    // Check and install dependencies if needed
-    await ensureDependenciesInstalled(context);
-
-    startLwrServer(context);
-
-    // Wait for initial component sync to complete before auto-opening preview
-    await initialSyncComponents(context);
-
-    // Auto-open preview if an LWC component is already open
-    const activeEditor = vscode.window.activeTextEditor;
-    if (activeEditor) {
-        const componentInfo = getComponentInfo(activeEditor.document.uri.fsPath);
-        if (componentInfo) {
-            currentComponentName = componentInfo.componentName;
-            await showPreview(context, componentInfo);
-        }
-    }
-}
-
-function checkIsSfdxProject(): boolean {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-        return false;
-    }
-
-    const sfdxProjectPath = path.join(workspaceFolders[0].uri.fsPath, 'sfdx-project.json');
-    return fs.existsSync(sfdxProjectPath);
-}
-
-async function setupLwrBaseProject(context: vscode.ExtensionContext): Promise<string> {
-    const extensionPath = context.extensionPath;
-
-    // Use globalStorageUri for proper extension storage with read/write permissions
-    const globalStoragePath = context.globalStorageUri.fsPath;
-
-    // Ensure global storage directory exists
-    if (!fs.existsSync(globalStoragePath)) {
-        fs.mkdirSync(globalStoragePath, { recursive: true });
-    }
-
-    // Get extension version to create versioned folder name
-    const packageJsonPath = path.join(extensionPath, 'package.json');
-    let version = '0.0.0';
-    try {
-        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-        version = packageJson.version || '0.0.0';
-    } catch (error) {
-        console.error('[LWC Preview] Failed to read package.json version:', error);
-    }
-
-    const sourceLwrBasePath = path.join(extensionPath, LWR_BASE_PROJECT_FOLDER);
-    const sourceZipPath = path.join(extensionPath, `${LWR_BASE_PROJECT_FOLDER}.zip`);
-    // Use versioned folder name to avoid conflicts between versions
-    const versionedFolderName = `${LWR_BASE_PROJECT_FOLDER}-${version}`;
-    const destLwrBasePath = path.join(globalStoragePath, versionedFolderName);
-
-    // If we already have the extracted folder in global storage, use it
-    if (fs.existsSync(destLwrBasePath)) {
-        console.log(`[LWC Preview] Using existing ${versionedFolderName} at: ${destLwrBasePath}`);
-        console.log(`[LWC Preview] LWR base project ready at: ${destLwrBasePath}`);
-        console.log(`[LWC Preview] Global storage path: ${globalStoragePath}`);
-        return destLwrBasePath;
-    }
-
-    // Prefer extracting from zip when packaged
-    if (fs.existsSync(sourceZipPath)) {
-        console.log(`[LWC Preview] Extracting ${versionedFolderName} from zip: ${sourceZipPath}`);
-        try {
-            const zip = new AdmZip(sourceZipPath);
-            // Extract to a temp location first
-            const tempExtractPath = path.join(globalStoragePath, 'temp-extract');
-            zip.extractAllTo(tempExtractPath, true);
-
-            // Move the extracted 'lwr-base-project' folder to the versioned name
-            const extractedPath = path.join(tempExtractPath, LWR_BASE_PROJECT_FOLDER);
-            if (!fs.existsSync(extractedPath)) {
-                throw new Error('Extraction succeeded but lwr-base-project folder not found in zip');
-            }
-
-            // Rename to versioned folder name
-            fs.renameSync(extractedPath, destLwrBasePath);
-
-            // Clean up temp directory
-            if (fs.existsSync(tempExtractPath)) {
-                fs.rmdirSync(tempExtractPath, { recursive: true });
-            }
-
-            console.log(`[LWC Preview] Successfully extracted ${versionedFolderName}`);
-        } catch (e) {
-            console.error('[LWC Preview] Failed to extract zip, falling back to copy:', e);
-            // Fall back to copying from source folder if available
-            if (fs.existsSync(sourceLwrBasePath)) {
-                console.log(`[LWC Preview] Copying ${versionedFolderName} from ${sourceLwrBasePath} to ${destLwrBasePath}`);
-                await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
-                console.log(`[LWC Preview] Successfully copied ${versionedFolderName}`);
-            } else {
-                throw new Error(`Neither zip nor source folder available. Looked for zip at: ${sourceZipPath} and folder at: ${sourceLwrBasePath}`);
-            }
-        }
-    } else {
-        // Dev scenario: zip not present, copy from workspace folder bundled with extension
-        if (!fs.existsSync(sourceLwrBasePath)) {
-            throw new Error(`lwr-base-project folder not found at: ${sourceLwrBasePath}`);
-        }
-        console.log(`[LWC Preview] Copying ${versionedFolderName} from ${sourceLwrBasePath} to ${destLwrBasePath}`);
-        await copyDirectoryOptimized(sourceLwrBasePath, destLwrBasePath);
-        console.log(`[LWC Preview] Successfully copied ${versionedFolderName}`);
-    }
-
-    console.log(`[LWC Preview] LWR base project (v${version}) ready at: ${destLwrBasePath}`);
-    console.log(`[LWC Preview] Global storage path: ${globalStoragePath}`);
-    return destLwrBasePath;
-}
-
-function setupFileWatcher(context: vscode.ExtensionContext) {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) return;
-
-    const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    const lwcSourcePath = path.join(workspaceRoot, 'force-app', 'main', 'default', 'lwc');
-
-    if (!fs.existsSync(lwcSourcePath)) return;
-
-    const pattern = new vscode.RelativePattern(lwcSourcePath, '**/*');
-    fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
-
-    fileWatcher.onDidCreate(async (uri) => {
-        await handleFileChange(uri.fsPath, workspaceRoot);
-    });
-
-    fileWatcher.onDidChange(async (uri) => {
-        await handleFileChange(uri.fsPath, workspaceRoot);
-    });
-
-    fileWatcher.onDidDelete(async (uri) => {
-        await handleFileDelete(uri.fsPath, workspaceRoot);
-    });
-
-    context.subscriptions.push(fileWatcher);
-}
-
-async function handleFileChange(filePath: string, workspaceRoot: string) {
-    if (!lwrProjectRoot) return;
-
-    const lwcSourcePath = path.join(workspaceRoot, 'force-app', 'main', 'default', 'lwc');
-    const destBasePath = path.join(lwrProjectRoot, 'src', 'modules', 'c');
-    const relativePath = path.relative(lwcSourcePath, filePath);
-    const destPath = path.join(destBasePath, relativePath);
-
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        if (shouldCopyFile(filePath, destPath)) {
-            copyFile(filePath, destPath);
-        }
-    }
-
-    clearLwrError();
-}
-
-async function handleFileDelete(filePath: string, workspaceRoot: string) {
-    if (!lwrProjectRoot) return;
-
-    const lwcSourcePath = path.join(workspaceRoot, 'force-app', 'main', 'default', 'lwc');
-    const destBasePath = path.join(lwrProjectRoot, 'src', 'modules', 'c');
-    const relativePath = path.relative(lwcSourcePath, filePath);
-    const destPath = path.join(destBasePath, relativePath);
-
-    if (fs.existsSync(destPath)) {
-        fs.unlinkSync(destPath);
-    }
-
-    clearLwrError();
-}
-
-function setupActiveEditorTracking(context: vscode.ExtensionContext) {
-    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
-        if (!editor) return;
-
-        const componentInfo = getComponentInfo(editor.document.uri.fsPath);
-        if (componentInfo) {
-            // Auto-open preview if not already open
-            if (!previewPanel) {
-                currentComponentName = componentInfo.componentName;
-                await showPreview(context, componentInfo);
-            }
-            // Update preview if component changed
-            else if (componentInfo.componentName !== currentComponentName) {
-                currentComponentName = componentInfo.componentName;
-                updatePreviewComponent(currentComponentName);
-            }
-        }
-    });
-
-    context.subscriptions.push(editorChangeDisposable);
-}
-
-function registerPreviewCommand(context: vscode.ExtensionContext) {
-    const disposable = vscode.commands.registerCommand('lwc-preview.togglePreview', async () => {
-        if (previewPanel) {
-            previewPanel.dispose();
-            previewPanel = null;
+        if (!this.isSfdxProject) {
+            this.handleNonSfdxProject();
             return;
         }
 
-        const activeEditor = vscode.window.activeTextEditor;
-        let componentInfo: ComponentInfo | null = null;
-
-        if (activeEditor) {
-            componentInfo = getComponentInfo(activeEditor.document.uri.fsPath);
-            if (componentInfo) {
-                currentComponentName = componentInfo.componentName;
-            }
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            this.statusBarManager.showError('No workspace folder found');
+            return;
         }
+        this.workspaceRoot = workspaceFolders[0].uri.fsPath;
 
-        if (!componentInfo) {
-            currentComponentName = null;
-        }
+        try {
+            this.lwrProjectRoot = await this.projectSetupService.setupLwrBaseProject();
 
-        await showPreview(context, componentInfo);
-    });
+            this.dependencyManager = new DependencyManager(
+                this.lwrProjectRoot,
+                this.statusBarManager
+            );
 
-    context.subscriptions.push(disposable);
-}
+            this.serverManager = new ServerManager(
+                this.lwrProjectRoot,
+                this.statusBarManager
+            );
 
-async function ensureDependenciesInstalled(context: vscode.ExtensionContext): Promise<void> {
-    if (!lwrProjectRoot) {
-        throw new Error('LWR project root not initialized');
-    }
+            this.fileWatcherService = new FileWatcherService(
+                this.context,
+                this.workspaceRoot,
+                this.lwrProjectRoot,
+                this.statusBarManager,
+                this.previewPanelManager
+            );
 
-    const projectRoot = lwrProjectRoot;
-    const nodeModulesPath = path.join(projectRoot, 'node_modules');
-
-    // Check if node_modules exists and has required packages
-    const needsInstall = !fs.existsSync(nodeModulesPath) ||
-        fs.readdirSync(nodeModulesPath).length === 0 ||
-        !fs.existsSync(path.join(nodeModulesPath, 'lwr'));
-
-    if (!needsInstall) {
-        console.log('[LWC Preview] Dependencies already installed, skipping npm install');
-        return;
-    }
-
-    console.log('[LWC Preview] Installing dependencies with npm install...');
-    await runNpmInstall(projectRoot, false);
-}
-
-async function runNpmInstall(projectRoot: string, useCI: boolean): Promise<void> {
-    const command = 'install';
-    const commandLabel = 'npm install';
-
-    if (statusBarItem) {
-        statusBarItem.text = "$(sync~spin) LWC Preview";
-        statusBarItem.tooltip = "Installing dependencies...";
-    }
-
-    return new Promise<void>((resolve, reject) => {
-        const npmProcess = child_process.spawn('npm', [command], {
-            cwd: projectRoot,
-            shell: true,
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-
-        if (npmProcess.stdout) {
-            npmProcess.stdout.on('data', (data: Buffer) => {
-                console.log(`[${commandLabel}]:`, data.toString());
+            this.serverManager.setErrorCallback((errorInfo) => {
+                this.previewPanelManager.sendLwrError(errorInfo);
             });
-        }
 
-        if (npmProcess.stderr) {
-            npmProcess.stderr.on('data', (data: Buffer) => {
-                console.log(`[${commandLabel} stderr]:`, data.toString());
+            this.previewPanelManager.setForceReloadCallback(async () => {
+                await this.handleForceReload();
             });
-        }
 
-        npmProcess.on('error', (error) => {
-            console.error(`[${commandLabel}] Failed:`, error);
-            if (statusBarItem) {
-                statusBarItem.text = "$(error) LWC Preview";
-                statusBarItem.tooltip = `Failed to install dependencies: ${error.message}`;
+            this.fileWatcherService.setup();
+            this.setupActiveEditorTracking();
+            this.registerCommands();
+
+            await this.dependencyManager.ensureInstalled();
+            this.serverManager.start();
+            await this.waitForServerReady();
+            await this.fileWatcherService.initialSync();
+
+            if (this.serverManager.isReady) {
+                this.statusBarManager.showReady(LWR_SERVER_PORT);
             }
-            vscode.window.showErrorMessage(`LWC Preview: Failed to install dependencies - ${error.message}`);
-            reject(error);
-        });
 
-        npmProcess.on('close', (code: number) => {
-            if (code === 0) {
-                console.log(`[${commandLabel}] Dependencies installed successfully`);
-                if (statusBarItem) {
-                    statusBarItem.text = "$(loading~spin) LWC Preview";
-                    statusBarItem.tooltip = "Starting LWC Preview server...";
-                }
-                resolve();
-            } else {
-                console.error(`[${commandLabel}] Process exited with code ${code}`);
-                if (statusBarItem) {
-                    statusBarItem.text = "$(error) LWC Preview";
-                    statusBarItem.tooltip = `Failed to install dependencies (exit code: ${code})`;
-                }
-                vscode.window.showErrorMessage(`LWC Preview: Failed to install dependencies (exit code: ${code})`);
-                reject(new Error(`${commandLabel} exited with code ${code}`));
-            }
-        });
-    });
-}
+            await this.autoOpenPreviewForActiveEditor();
+        } catch (error) {
+            const errorMessage = error instanceof Error
+                ? formatErrorForDisplay(error)
+                : String(error);
 
-async function startLwrServer(context: vscode.ExtensionContext) {
-    if (lwrServerProcess) return;
-
-    if (!lwrProjectRoot) {
-        throw new Error('LWR project root not initialized');
+            console.error(`${LOG_PREFIX} Activation failed:`, error);
+            vscode.window.showErrorMessage(`Failed to activate LWC Preview: ${errorMessage}`);
+            this.statusBarManager.showError('Activation failed');
+        }
     }
 
-    const projectRoot = lwrProjectRoot;
+    /**
+     * Check if current workspace is an SFDX project
+     */
+    private checkIsSfdxProject(): boolean {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            return false;
+        }
 
-    // Use npm to run lwr with port argument
-    const command = 'npm';
-    const args = ['start', '--', '--port', String(LWR_SERVER_PORT)];
+        const sfdxProjectPath = path.join(
+            workspaceFolders[0].uri.fsPath,
+            SFDX_PROJECT_FILE
+        );
 
-    console.log(`[LWC Preview] Starting LWR server in: ${projectRoot}`);
-
-    lwrServerProcess = child_process.spawn(command, args, {
-        cwd: projectRoot,
-        shell: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    if (lwrServerProcess.stdout) {
-        lwrServerProcess.stdout.on('data', (data: Buffer) => {
-            const output = data.toString();
-            console.log('[LWR Server]:', output);
-
-            if (output.includes('Server listening') || output.includes('localhost:')) {
-                if (!serverReady) {
-                    serverReady = true;
-                    if (statusBarItem) {
-                        statusBarItem.text = "$(check) LWC Preview";
-                        statusBarItem.tooltip = `LWC Preview ready (port ${LWR_SERVER_PORT})`;
-                    }
-                }
-            }
-        });
+        return fs.existsSync(sfdxProjectPath);
     }
 
-    if (lwrServerProcess.stderr) {
-        lwrServerProcess.stderr.on('data', (data: Buffer) => {
-            const errorOutput = data.toString();
-            console.error('[LWR Server Error]:', errorOutput);
-            handleLwrError(errorOutput);
-        });
-    }
+    /**
+     * Handle non-SFDX project scenario
+     */
+    private handleNonSfdxProject(): void {
+        this.statusBarManager.showWarning('Not an SFDX project');
 
-    lwrServerProcess.on('error', (error) => {
-        console.error('[LWR Server Spawn Error]:', error);
-        if (statusBarItem) {
-            statusBarItem.text = "$(error) LWC Preview";
-            statusBarItem.tooltip = `Failed to start server: ${error.message}`;
-        }
-        vscode.window.showErrorMessage(`LWC Preview: Failed to start server - ${error.message}`);
-    });
-
-    lwrServerProcess.on('close', (code: number) => {
-        console.log(`[LWR Server] Process closed with code ${code}`);
-        lwrServerProcess = null;
-        serverReady = false;
-        if (statusBarItem && code !== 0) {
-            statusBarItem.text = "$(warning) LWC Preview";
-            statusBarItem.tooltip = `LWC Preview server stopped (exit code: ${code})`;
-        }
-    });
-}
-
-function handleLwrError(errorOutput: string) {
-    if (!errorOutput.includes('Error') && !errorOutput.includes('LWC1')) {
-        return;
-    }
-
-    if (errorDebounceTimer) {
-        clearTimeout(errorDebounceTimer);
-    }
-
-    errorDebounceTimer = setTimeout(() => {
-        const errorInfo = parseLwrError(errorOutput);
-
-        if (errorInfo && !hasActiveError) {
-            sendLwrErrorToPreview(errorInfo.message, errorInfo.stack);
-            vscode.window.showErrorMessage(`LWR Error: ${errorInfo.message.substring(0, 80)}...`);
-        }
-    }, 500);
-}
-
-async function initialSyncComponents(context: vscode.ExtensionContext) {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) return;
-
-    if (!lwrProjectRoot) {
-        throw new Error('LWR project root not initialized');
-    }
-
-    const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    const lwcSourcePath = path.join(workspaceRoot, 'force-app', 'main', 'default', 'lwc');
-    const destPath = path.join(lwrProjectRoot, 'src', 'modules', 'c');
-
-    if (!fs.existsSync(lwcSourcePath)) return;
-
-    try {
-        isInitialCopyInProgress = true;
-
-        if (statusBarItem) {
-            statusBarItem.text = "$(sync~spin) LWC Preview";
-            statusBarItem.tooltip = "Syncing LWC components...";
-        }
-
-        console.log(`[LWC Preview] Copying SFDX LWC components from ${lwcSourcePath} to ${destPath}`);
-        await copyDirectoryOptimized(lwcSourcePath, destPath);
-
-        if (statusBarItem && serverReady) {
-            statusBarItem.text = "$(check) LWC Preview";
-            statusBarItem.tooltip = `LWC Preview ready (port ${LWR_SERVER_PORT})`;
-        }
-
-        if (previewPanel) {
-            updatePreviewLoadingState(false);
-        }
-    } catch (error) {
-        vscode.window.showErrorMessage('Failed to sync LWC components');
-        if (statusBarItem) {
-            statusBarItem.text = "$(warning) LWC Preview";
-            statusBarItem.tooltip = "Failed to sync components";
-        }
-    } finally {
-        isInitialCopyInProgress = false;
-    }
-}
-
-async function showPreview(context: vscode.ExtensionContext, componentInfo: ComponentInfo | null) {
-    previewPanel = vscode.window.createWebviewPanel(
-        'lwcPreview',
-        'LWC Preview',
-        vscode.ViewColumn.Two,
-        {
-            enableScripts: true,
-            retainContextWhenHidden: true,
-            localResourceRoots: []
-        }
-    );
-
-    previewPanel.onDidDispose(() => {
-        previewPanel = null;
-        currentComponentName = null;
-    }, null, context.subscriptions);
-
-    if (!serverReady) {
-        previewPanel.webview.html = getLoadingHtml();
-
-        const maxAttempts = 30;
-        let attempts = 0;
-
-        const checkServer = setInterval(() => {
-            attempts++;
-            if (serverReady) {
-                clearInterval(checkServer);
-                if (previewPanel) {
-                    previewPanel.webview.html = getPreviewHtml(
-                        componentInfo?.componentName || '',
-                        LWR_SERVER_PORT
-                    );
-                }
-            } else if (attempts >= maxAttempts) {
-                clearInterval(checkServer);
-                if (previewPanel) {
-                    previewPanel.webview.html = getErrorHtml('Server failed to start. Please check the terminal output.');
-                }
-            }
-        }, 1000);
-    } else {
-        previewPanel.webview.html = getPreviewHtml(
-            componentInfo?.componentName || '',
-            LWR_SERVER_PORT
+        // Register a disabled command that shows warning
+        this.context.subscriptions.push(
+            vscode.commands.registerCommand(COMMAND_TOGGLE_PREVIEW, () => {
+                vscode.window.showWarningMessage(
+                    'LWC Preview requires an SFDX project (sfdx-project.json not found)'
+                );
+            })
         );
     }
-}
 
-function updatePreviewComponent(componentName: string | null) {
-    if (previewPanel) {
-        previewPanel.webview.postMessage({
-            type: 'updateComponent',
-            componentName: componentName
-        });
-        hasActiveError = false;
+    /**
+     * Setup active editor tracking to auto-switch preview
+     */
+    private setupActiveEditorTracking(): void {
+        const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
+            async (editor) => {
+                if (!editor || this.isForceReloading) return;
+
+                const componentInfo = getComponentInfo(editor.document.uri.fsPath);
+                if (!componentInfo) return;
+
+                const componentDirPath = getComponentDirectoryPath(editor.document.uri.fsPath);
+                if (!componentDirPath) return;
+
+                const isValid = isComponentValid(componentDirPath, componentInfo.componentName);
+                if (!isValid) {
+                    if (this.previewPanelManager.getCurrentComponentName() === componentInfo.componentName) {
+                        this.previewPanelManager.close();
+                    }
+                    return;
+                }
+
+                if (!this.previewPanelManager.isOpen()) {
+                    if (this.previewPanelManager.isAutoOpenEnabled()) {
+                        this.previewPanelManager.setCurrentComponentName(componentInfo.componentName);
+                        await this.showPreview(componentInfo);
+                    }
+                } else if (componentInfo.componentName !== this.previewPanelManager.getCurrentComponentName()) {
+                    this.previewPanelManager.setCurrentComponentName(componentInfo.componentName);
+                    this.previewPanelManager.updateComponent(componentInfo.componentName);
+                }
+            }
+        );
+
+        this.context.subscriptions.push(editorChangeDisposable);
+    }
+
+    /**
+     * Register VS Code commands
+     */
+    private registerCommands(): void {
+        this.previewCommand = vscode.commands.registerCommand(
+            COMMAND_TOGGLE_PREVIEW,
+            async () => {
+                if (!this.serverManager || !this.serverManager.isReady) {
+                    vscode.window.showWarningMessage('LWC Preview: Server is starting, please wait...');
+                    return;
+                }
+
+                if (this.previewPanelManager.isOpen()) {
+                    this.previewPanelManager.close();
+                    return;
+                }
+
+                const activeEditor = vscode.window.activeTextEditor;
+                if (!activeEditor) {
+                    vscode.window.showInformationMessage('LWC Preview: Please open an LWC component file to preview');
+                    return;
+                }
+
+                const componentInfo = getComponentInfo(activeEditor.document.uri.fsPath);
+                if (!componentInfo) {
+                    vscode.window.showInformationMessage('LWC Preview: Please open an LWC component file to preview');
+                    return;
+                }
+
+                const componentDirPath = getComponentDirectoryPath(activeEditor.document.uri.fsPath);
+                if (!componentDirPath) return;
+
+                const isValid = isComponentValid(componentDirPath, componentInfo.componentName);
+                if (!isValid) {
+                    vscode.window.showWarningMessage(
+                        `LWC Preview: Component "${componentInfo.componentName}" is missing required files (.html or .js)`
+                    );
+                    return;
+                }
+
+                this.previewPanelManager.setCurrentComponentName(componentInfo.componentName);
+                await this.showPreview(componentInfo);
+            }
+        );
+
+        this.context.subscriptions.push(this.previewCommand);
+    }
+
+    /**
+     * Show the preview panel
+     */
+    private async showPreview(componentInfo: ComponentInfo | null): Promise<void> {
+        if (!this.serverManager) {
+            vscode.window.showErrorMessage('Server not initialized');
+            return;
+        }
+
+        const serverReady = this.serverManager.isReady;
+        await this.previewPanelManager.show(componentInfo, serverReady);
+
+        if (!serverReady) {
+            await this.waitForServerReadyAndUpdate(componentInfo);
+        }
+    }
+
+    /**
+     * Wait for server to become ready and update preview
+     */
+    private async waitForServerReadyAndUpdate(componentInfo: ComponentInfo | null): Promise<void> {
+        const maxWaitTime = 30000;
+        const checkInterval = 1000;
+        let elapsed = 0;
+
+        while (elapsed < maxWaitTime) {
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+            elapsed += checkInterval;
+
+            if (this.serverManager?.isReady) {
+                this.previewPanelManager.onServerReady(componentInfo);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Wait for server to be ready during activation
+     */
+    private async waitForServerReady(): Promise<void> {
+        const maxWaitTime = 30000;
+        const checkInterval = 500;
+        let elapsed = 0;
+
+        while (elapsed < maxWaitTime) {
+            if (this.serverManager?.isReady) {
+                return;
+            }
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+            elapsed += checkInterval;
+        }
+
+        throw new ProjectSetupError('Server failed to start within timeout');
+    }
+
+    /**
+     * Auto-open preview for active editor if applicable
+     */
+    private async autoOpenPreviewForActiveEditor(): Promise<void> {
+        if (!this.previewPanelManager.isAutoOpenEnabled()) return;
+
+        const activeEditor = vscode.window.activeTextEditor;
+        if (!activeEditor) return;
+
+        const componentInfo = getComponentInfo(activeEditor.document.uri.fsPath);
+        if (!componentInfo) return;
+
+        const componentDirPath = getComponentDirectoryPath(activeEditor.document.uri.fsPath);
+        if (!componentDirPath) return;
+
+        if (!isComponentValid(componentDirPath, componentInfo.componentName)) return;
+
+        this.previewPanelManager.setCurrentComponentName(componentInfo.componentName);
+        await this.showPreview(componentInfo);
+    }
+
+    /**
+     * Handle force reload request from preview panel
+     */
+    private async handleForceReload(): Promise<void> {
+        if (!this.serverManager) {
+            throw new Error('Server manager not initialized');
+        }
+
+        this.isForceReloading = true;
+        const currentComponent = this.previewPanelManager.getCurrentComponentName();
+
+        try {
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: "LWC Preview: Force Reload",
+                    cancellable: false
+                },
+                async (progress) => {
+                    try {
+                        if (!this.serverManager) {
+                            throw new Error('Server manager not available');
+                        }
+
+                        progress.report({ increment: 0, message: "Closing preview..." });
+                        this.previewPanelManager.close();
+                        await new Promise(resolve => setTimeout(resolve, 500));
+
+                        progress.report({ increment: 10, message: "Restarting server..." });
+                        await this.serverManager.restart();
+
+                        progress.report({ increment: 60, message: "Server ready!" });
+
+                        progress.report({ increment: 10, message: "Stabilizing..." });
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+
+                        progress.report({ increment: 10, message: "Reopening preview..." });
+
+                        if (currentComponent) {
+                            const lwcSourcePath = path.join(this.workspaceRoot!, LWC_SOURCE_PATH);
+                            const componentDirPath = path.join(lwcSourcePath, currentComponent);
+
+                            if (isComponentValid(componentDirPath, currentComponent)) {
+                                const componentInfo: ComponentInfo = {
+                                    componentName: currentComponent,
+                                    modulePath: `c/${currentComponent}`
+                                };
+
+                                this.previewPanelManager.setCurrentComponentName(currentComponent);
+                                await this.showPreview(componentInfo);
+                                progress.report({ increment: 10, message: "Complete!" });
+                            } else {
+                                vscode.window.showWarningMessage(
+                                    `Component "${currentComponent}" is missing required files (.html or .js)`
+                                );
+                            }
+                        }
+                    } catch (error: any) {
+                        console.error(`${LOG_PREFIX} Force reload failed:`, error);
+
+                        const errorMessage = error?.message || String(error);
+                        const result = await vscode.window.showErrorMessage(
+                            `Force Reload Failed: ${errorMessage}`,
+                            'Retry',
+                            'Cancel'
+                        );
+
+                        if (result === 'Retry') {
+                            await this.handleForceReload();
+                        }
+                    }
+                }
+            );
+
+            this.isForceReloading = false;
+
+            if (this.previewPanelManager.isOpen()) {
+                vscode.window.showInformationMessage('LWC Preview: Force reload completed successfully!');
+            }
+        } catch (error: any) {
+            this.isForceReloading = false;
+            console.error(`${LOG_PREFIX} Force reload error:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Deactivate the extension
+     */
+    public deactivate(): void {
+        if (this.serverManager) {
+            this.serverManager.stop();
+        }
+
+        if (this.fileWatcherService) {
+            this.fileWatcherService.dispose();
+        }
+
+        this.statusBarManager.dispose();
+
+        if (this.isSfdxProject && this.lwrProjectRoot) {
+            cleanupComponentFolder(this.lwrProjectRoot);
+        }
     }
 }
 
-function updatePreviewLoadingState(isLoading: boolean) {
-    if (previewPanel) {
-        previewPanel.webview.postMessage({
-            type: 'updateLoadingState',
-            isLoading: isLoading
-        });
-    }
+// Extension instance
+let extensionInstance: LwcPreviewExtension | null = null;
+
+/**
+ * Extension activation entry point
+ */
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    extensionInstance = new LwcPreviewExtension(context);
+    await extensionInstance.activate();
 }
 
-function sendLwrErrorToPreview(errorMessage: string, errorStack: string) {
-    if (previewPanel && !hasActiveError) {
-        previewPanel.webview.postMessage({
-            type: 'lwrError',
-            errorMessage: errorMessage,
-            errorStack: errorStack
-        });
-        hasActiveError = true;
-    }
-}
-
-function clearLwrError() {
-    if (previewPanel && hasActiveError) {
-        previewPanel.webview.postMessage({
-            type: 'clearLwrError'
-        });
-        hasActiveError = false;
-    }
-}
-
-export function deactivate() {
-    if (lwrServerProcess) {
-        lwrServerProcess.kill();
-        lwrServerProcess = null;
-    }
-
-    if (fileWatcher) {
-        fileWatcher.dispose();
-        fileWatcher = null;
-    }
-
-    if (errorDebounceTimer) {
-        clearTimeout(errorDebounceTimer);
-        errorDebounceTimer = null;
-    }
-
-    if (statusBarItem) {
-        statusBarItem.dispose();
-        statusBarItem = null;
-    }
-
-    if (extensionContext && isSfdxProject && lwrProjectRoot) {
-        console.log('[LWC Preview] Cleaning up lwr-base-project folder...');
-        cleanupComponentFolder(lwrProjectRoot);
+/**
+ * Extension deactivation entry point
+ */
+export function deactivate(): void {
+    if (extensionInstance) {
+        extensionInstance.deactivate();
+        extensionInstance = null;
     }
 }
