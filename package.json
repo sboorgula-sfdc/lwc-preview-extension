@@ -2,7 +2,7 @@
   "name": "lwc-preview",
   "displayName": "LWC Preview",
   "description": "Preview Lightning Web Components in VS Code",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "lwc-preview-dev",
   "repository": {
     "type": "git",
